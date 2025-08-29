@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>月星座農業スケジュール表ジェネレーター（本格運用）</title>
+  <style>
+    body { font-family: "Segoe UI", Arial, sans-serif; background:#f4f6f8; color:#243447; padding:20px; }
+    h1 { text-align:center; margin:0 0 6px; }
+    .subtitle { text-align:center; color:#5a6b7a; margin-bottom:14px; }
+    form { text-align:center; margin:12px 0 16px; }
+    input[type="number"] { padding:6px 8px; margin:0 6px; width:96px; }
+    button { padding:6px 14px; cursor:pointer; }
+    table { width:100%; border-collapse:collapse; background:#fff; }
+    th, td { border:1px solid #dfe6ee; padding:8px 10px; text-align:center; }
+    th { background:#324960; color:#fff; font-weight:600; }
+    tbody tr:nth-child(even) { background:#f9fbfd; }
+    .phase { font-size:18px; }
+    .earth { background:#e6f6ea; }
+    .water { background:#e7f0fb; }
+    .air   { background:#fff7da; }
+    .fire  { background:#ffe8e4; }
+    .transition { background:#f2f4f6; color:#333; }
+    .note { margin-top:10px; font-size:12px; color:#5f6a72; }
+    @media print {
+      body { background:#fff; padding:0; }
+      a, .note { color:#000; text-decoration:none; }
+    }
+  </style>
+</head>
+<body>
+  <h1>月星座農業スケジュール表ジェネレーター</h1>
+  <div class="subtitle">年と月を入力 → 月齢・月相・月星座を自動計算（JST基準）</div>
+
+  <form id="scheduleForm">
+    <label>年: <input type="number" id="year" min="1900" max="2100" required></label>
+    <label>月: <input type="number" id="month" min="1" max="12" required></label>
+    <button type="submit">生成する</button>
+  </form>
+
+  <div id="output"></div>
+
+  <script>
+    // ========= 基本定数 =========
+    const SYNODIC_MONTH = 29.530588853; // 朔望月（日）
+    const JD_UNIX_EPOCH = 2440587.5;    // 1970-01-01T00:00:00Z のJD
+    const JD_J2000 = 2451545.0;         // 2000-01-01 12:00 TT 近似
+    const JD_REF_NEWM = 2451550.1;      // 2000-01-06 18:14 近傍の新月JD（近似）
+
+    const SIGNS = ["牡羊座","牡牛座","双子座","蟹座","獅子座","乙女座","天秤座","蠍座","射手座","山羊座","水瓶座","魚座"];
+    const ELEMENT_CLASS = { "牡羊座":"fire", "牡牛座":"earth", "双子座":"air", "蟹座":"water", "獅子座":"fire", "乙女座":"earth", "天秤座":"air", "蠍座":"water", "射手座":"fire", "山羊座":"earth", "水瓶座":"air", "魚座":"water" };
+    const ELEMENT_JP = { fire:"火", earth:"地", air:"風", water:"水" };
+    const PHASE_EMOJI = ["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"];
+
+    // ========= 日付と時刻（JST）ヘルパ =========
+    // JSTの特定日時（年・月・日・時）をUTCのDateとして生成（計算はUTCで行う）
+    function dateJSTasUTC(y, m, d, hJst = 12, min = 0) {
+      // JST = UTC+9 → UTC = JST - 9h
+      return new Date(Date.UTC(y, m - 1, d, hJst - 9, min, 0));
+    }
+
+    // ========= JD（ユリウス日） =========
+    function toJulianDay(dateUtc) {
+      return dateUtc.getTime() / 86400000 + JD_UNIX_EPOCH;
+    }
+
+    // ========= 角度ヘルパ =========
+    const D2R = Math.PI / 180;
+    const R2D = 180 / Math.PI;
+    function norm360(deg) {
+      return (deg % 360 + 360) % 360;
+    }
+
+    // ========= 月齢・月相 =========
+    function moonAgeDays(jd) {
+      const days = (jd - JD_REF_NEWM) % SYNODIC_MONTH;
+      return (days + SYNODIC_MONTH) % SYNODIC_MONTH;
+    }
+    function phaseEmoji(age) {
+      // 8区分：境界を朔望月/16だけずらして丸める
+      const bin = Math.floor(((age + SYNODIC_MONTH / 16) / (SYNODIC_MONTH / 8)) % 8);
+      return PHASE_EMOJI[bin];
+    }
+
+    // ========= 太陽の平均近点離角（M）近似 =========
+    function sunMeanAnomaly(T) {
+      // Meeus近似：M（太陽）[deg]
+      let M = 357.5291092 + 35999.0502909 * T - 0.0001536 * T * T + (T * T * T) / 24490000;
+      return norm360(M);
+    }
+
+    // ========= 月の黄経（低次近似） =========
+    function moonEclipticLongitude(jd) {
+      // ユリウス世紀
+      const T = (jd - JD_J2000) / 36525;
+
+      // 平均黄経 L'、月の平均近点離角 M'、太陽の平均近点離角 M、離角 D、緯度引数 F（度）
+      let Lp = 218.3164477 + 481267.88123421 * T - 0.0015786 * T*T + (T*T*T)/538841 - (T*T*T*T)/65194000;
+      let Mp = 134.9633964 + 477198.8675055 * T + 0.0087414 * T*T + (T*T*T)/69699 - (T*T*T*T)/14712000;
+      let M  = 357.5291092 + 35999.0502909 * T - 0.0001536 * T*T + (T*T*T)/24490000;
+      let D  = 297.8501921 + 445267.1114034 * T - 0.0018819 * T*T + (T*T*T)/545868 - (T*T*T*T)/113065000;
+      let F  = 93.2720950  + 483202.0175233 * T - 0.0036539 * T*T - (T*T*T)/3526000 + (T*T*T*T)/863310000;
+
+      Lp = norm360(Lp); Mp = norm360(Mp); M = norm360(M); D = norm360(D); F = norm360(F);
+
+      // 主要項のみ（低次）で黄経λを近似（度）
+      const lambda = Lp
+        + 6.289 * Math.sin(Mp * D2R)            // +6.289° sin M'
+        + 1.274 * Math.sin((2*D - Mp) * D2R)    // +1.274° sin(2D - M')
+        + 0.658 * Math.sin((2*D) * D2R)         // +0.658° sin 2D
+        + 0.214 * Math.sin((2*Mp) * D2R)        // +0.214° sin 2M'
+        - 0.186 * Math.sin(M * D2R)             // -0.186° sin M（太陽項）
+        - 0.114 * Math.sin((2*F) * D2R);        // -0.114° sin 2F（光行差的補正含む近似）
+
+      return norm360(lambda);
+    }
+
+    // ========= 月星座（トロピカル） =========
+    function moonSignFromLongitude(lambda) {
+      const idx = Math.floor(lambda / 30) % 12; // 0=牡羊座
+      return SIGNS[idx];
+    }
+
+    // ========= 同日内の星座切替時刻の推定 =========
+    function findSignChangeJST(y, m, d) {
+      // 00:00〜23:59 JSTでサンプリング
+      let prevSign = null;
+      let changeHour = null;
+      for (let h = 0; h <= 23; h++) {
+        const jd = toJulianDay(dateJSTasUTC(y, m, d, h, 0));
+        const sign = moonSignFromLongitude(moonEclipticLongitude(jd));
+        if (prevSign && sign !== prevSign) {
+          changeHour = h; // 前の時間とこの時間の間で変化
+          break;
+        }
+        prevSign = sign;
+      }
+      if (changeHour === null) return null;
+
+      // 時刻を10分単位→1分単位で2段階精密化
+      let leftMin = (changeHour - 1 >= 0 ? changeHour - 1 : 0) * 60;
+      let rightMin = changeHour * 60;
+      let leftSign = moonSignFromLongitude(moonEclipticLongitude(toJulianDay(dateJSTasUTC(y, m, d, Math.floor(leftMin/60), leftMin%60))));
+      for (let step of [10, 1]) {
+        for (let t = leftMin; t <= rightMin; t += step) {
+          const h = Math.floor(t / 60), min = t % 60;
+          const jd = toJulianDay(dateJSTasUTC(y, m, d, h, min));
+          const s = moonSignFromLongitude(moonEclipticLongitude(jd));
+          if (s !== leftSign) {
+            // 変化直後に到達
+            rightMin = t;
+            break;
+          }
+        }
+        leftMin = Math.max(rightMin - step, 0);
+        leftSign = moonSignFromLongitude(moonEclipticLongitude(toJulianDay(dateJSTasUTC(y, m, d, Math.floor(leftMin/60), leftMin%60))));
+      }
+      const H = Math.floor(rightMin / 60);
+      const M = rightMin % 60;
+      return { H, M };
+    }
+
+    // ========= 推奨作業（エレメント＋満ち欠け考慮） =========
+    function recommendWork(elementClass, age) {
+      const waxing = age < SYNODIC_MONTH / 2; // 新月→満月：満ち期
+      let core = "";
+      switch (elementClass) {
+        case "earth": core = "根菜の種まき・植え付け、土壌改良、堆肥作り"; break;
+        case "water": core = "葉物の種まき・植え付け、水やり、挿し木"; break;
+        case "air":   core = "剪定、通気性改善、支柱立て・誘引"; break;
+        case "fire":  core = "果菜の収穫、病害虫対策、追肥"; break;
+      }
+      let extra = "";
+      const nearFull = Math.abs(age - SYNODIC_MONTH/2) < 0.7;
+      const nearNew  = (age < 0.7) || (SYNODIC_MONTH - age < 0.7);
+      if (nearFull) extra = "（満月：収穫・選別・水分管理）";
+      else if (nearNew) extra = "（新月：計画見直し・畝整備・種子準備）";
+      else extra = waxing ? "（満ち期：地上部の管理強化）" : "（欠け期：地下部の充実・保存向け収穫）";
+      return core + " " + extra;
+    }
+
+    // ========= 月次表生成 =========
+    function generateSchedule(year, month) {
+      const output = document.getElementById("output");
+      const lastDay = new Date(year, month, 0).getDate(); // 月末日
+
+      let html = `<h2>${year}年${month}月の月星座農業スケジュール</h2>`;
+      html += `<table><thead><tr>
+        <th>日付</th><th>月齢</th><th>月相</th><th>月星座</th><th>エレメント</th><th>推奨作業</th>
+      </tr></thead><tbody>`;
+
+      for (let d = 1; d <= lastDay; d++) {
+        // 基準はJST正午
+        const jdNoon = toJulianDay(dateJSTasUTC(year, month, d, 12, 0));
+        const age = moonAgeDays(jdNoon);
+        const emoji = phaseEmoji(age);
+
+        // 月星座（正午）と、日内切替チェック
+        const lambdaNoon = moonEclipticLongitude(jdNoon);
+        const signNoon = moonSignFromLongitude(lambdaNoon);
+        const elemClass = ELEMENT_CLASS[signNoon];
+
+        // 日内で変わるか？
+        const jd00 = toJulianDay(dateJSTasUTC(year, month, d, 0, 0));
+        const jd23 = toJulianDay(dateJSTasUTC(year, month, d, 23, 59));
+        const signStart = moonSignFromLongitude(moonEclipticLongitude(jd00));
+        const signEnd   = moonSignFromLongitude(moonEclipticLongitude(jd23));
+
+        let signCell = signNoon;
+        if (signStart !== signEnd) {
+          const t = findSignChangeJST(year, month, d);
+          if (t) {
+            signCell = `${signStart} → ${signEnd} (${String(t.H).padStart(2,'0')}:${String(t.M).padStart(2,'0')})`;
+          } else {
+            signCell = `${signStart} → ${signEnd}`;
+          }
+        }
+
+        const elemForCell = (signStart !== signEnd) ? "transition" : elemClass;
+        const elemLabel = (signStart !== signEnd)
+          ? "切替"
+          : ELEMENT_JP[elemClass];
+
+        const work = recommendWork(elemClass, age);
+
+        html += `<tr>
+          <td>${month}/${d}</td>
+          <td>${age.toFixed(1)}</td>
+          <td class="phase">${emoji}</td>
+          <td>${signCell}</td>
+          <td class="${elemForCell}">${elemLabel}</td>
+          <td>${work}</td>
+        </tr>`;
+      }
+
+      html += `</tbody></table>
+      <div class="note">
+        注1：計算は近似式（Meeusの主要項による月黄経、固定朔望月長）に基づくため、実際の天文暦と数分〜数時間のずれが生じることがあります。<br/>
+        注2：星座切替時刻はJST基準の概算です。運用では気象・圃場条件と併用して判断してください。<br/>
+        注3：端末のタイムゾーン設定がJSTでない場合、切替時刻の表示にずれが出ます（本運用はJST推奨）。
+      </div>`;
+
+      output.innerHTML = html;
+    }
+
+    // ========= フォームイベント =========
+    document.getElementById("scheduleForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const year = parseInt(document.getElementById("year").value, 10);
+      const month = parseInt(document.getElementById("month").value, 10);
+      if (!year || !month) return;
+      generateSchedule(year, month);
+    });
+
+    // デフォルトを現在年月にセット
+    (function initDefaultYM() {
+      const now = new Date();
+      document.getElementById("year").value = now.getFullYear();
+      document.getElementById("month").value = now.getMonth() + 1;
+    })();
+  </script>
+</body>
+</html>
